@@ -5,13 +5,18 @@ import { SettingsUiAccount } from '@/components/settings/settings-ui-account'
 
 import { AppPage } from '@/components/app-page'
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
-import { useState } from 'react';
+import * as MediaLibrary from 'expo-media-library';
+import { useRef, useState } from 'react';
 import { Button, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 
 export default function TabCameraScreen() {
   const [facing, setFacing] = useState<CameraType>('back');
   const [permission, requestPermission] = useCameraPermissions();
+  const [mediaPermission, requestMediaPermission] = MediaLibrary.usePermissions();
+  const [isReady, setIsReady] = useState(false);
+  const [isTaking, setIsTaking] = useState(false);
+  const cameraRef = useRef<any>(null);
 
   if (!permission) {
     // Camera permissions are still loading.
@@ -32,12 +37,48 @@ export default function TabCameraScreen() {
     setFacing(current => (current === 'back' ? 'front' : 'back'));
   }
 
+  const handleTakePicture = async () => {
+    if (!isReady || isTaking) return;
+    try {
+      // Ensure we can save to the media library
+      if (!mediaPermission?.granted) {
+        const result = await requestMediaPermission();
+        if (!result?.granted) {
+          return;
+        }
+      }
+
+      // this is where we start writing image to the media library
+      setIsTaking(true);
+      const pictureRef = await cameraRef.current?.takePictureAsync({ pictureRef: true });
+      if (!pictureRef) return;
+      // this is where we save the image to the media library
+      const saved = await pictureRef.savePictureAsync();
+      if (!saved?.uri) return;
+      await MediaLibrary.saveToLibraryAsync(saved.uri);
+    } finally {
+      setIsTaking(false);
+    }
+  };
+
   return (
     <View style={styles.container}>
-      <CameraView style={styles.camera} facing={facing} />
+      <CameraView
+        ref={cameraRef}
+        style={styles.camera}
+        facing={facing}
+        onCameraReady={() => setIsReady(true)}
+      />
       <View style={styles.buttonContainer}>
         <TouchableOpacity style={styles.button} onPress={toggleCameraFacing}>
           <Text style={styles.text}>Flip Camera</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={handleTakePicture}
+          disabled={!isReady || isTaking}
+        >
+          <View style={[styles.shutter, isTaking ? { opacity: 0.6 } : null]} />
         </TouchableOpacity>
       </View>
     </View>
@@ -67,6 +108,14 @@ const styles = StyleSheet.create({
   button: {
     flex: 1,
     alignItems: 'center',
+  },
+  shutter: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    borderWidth: 4,
+    borderColor: 'white',
+    backgroundColor: 'transparent',
   },
   text: {
     fontSize: 24,
