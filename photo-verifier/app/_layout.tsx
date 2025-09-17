@@ -57,13 +57,13 @@ function RootNavigator() {
   const { isAuthenticated } = useAuth()
   return (
     <Stack screenOptions={{ headerShown: false }}>
-      <Stack.Protected guard={isAuthenticated}>
+      {/* <Stack.Protected guard={isAuthenticated}> */}
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="+not-found" />
-      </Stack.Protected>
+      {/* </Stack.Protected>
       <Stack.Protected guard={!isAuthenticated}>
         <Stack.Screen name="sign-in" />
-      </Stack.Protected>
+      </Stack.Protected> */}
     </Stack>
   )
 }
