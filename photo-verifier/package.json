@@ -37,6 +37,7 @@
   "version": "1.0.0",
   "dependencies": {
     "@expo/vector-icons": "^14.1.0",
+    "@napi-rs/blake-hash": "^1.3.5",
     "@react-native-async-storage/async-storage": "2.1.2",
     "@react-native-clipboard/clipboard": "^1.16.2",
     "@react-navigation/bottom-tabs": "^7.3.10",
@@ -61,6 +62,7 @@
     "expo-image": "~2.4.0",
     "expo-linear-gradient": "~14.1.5",
     "expo-linking": "~7.1.6",
+    "expo-location": "~18.1.6",
     "expo-media-library": "~17.1.7",
     "expo-router": "~5.1.5",
     "expo-splash-screen": "~0.30.9",

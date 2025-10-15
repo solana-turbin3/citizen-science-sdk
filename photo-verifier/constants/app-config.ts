@@ -19,4 +19,10 @@ export class AppConfig {
       network: ClusterNetwork.Testnet,
     },
   ]
+  // Seeker Genesis Token config (example placeholder mints per cluster)
+  static seeker = {
+    devnetMints: [] as string[],
+    testnetMints: [] as string[],
+    mainnetMints: [] as string[],
+  }
 }

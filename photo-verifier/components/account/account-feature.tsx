@@ -7,15 +7,18 @@ import { AccountUiButtons } from './account-ui-buttons'
 import { AccountUiBalance } from '@/components/account/account-ui-balance'
 import { AccountUiTokenAccounts } from '@/components/account/account-ui-token-accounts'
 import { RefreshControl, ScrollView } from 'react-native'
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useGetBalanceInvalidate } from '@/components/account/use-get-balance'
 import { PublicKey } from '@solana/web3.js'
 import { useGetTokenAccountsInvalidate } from '@/components/account/use-get-token-accounts'
 import { WalletUiButtonConnect } from '@/components/solana/wallet-ui-button-connect'
+import { blake3 } from '@noble/hashes/blake3'
+import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils'
 
 export function AccountFeature() {
   const { account } = useWalletUi()
   const [refreshing, setRefreshing] = useState(false)
+  const [blake3Message, setBlake3Message] = useState<string>('')
   const invalidateBalance = useGetBalanceInvalidate({ address: account?.publicKey as PublicKey })
   const invalidateTokenAccounts = useGetTokenAccountsInvalidate({ address: account?.publicKey as PublicKey })
   const onRefresh = useCallback(async () => {
@@ -24,8 +27,10 @@ export function AccountFeature() {
     setRefreshing(false)
   }, [invalidateBalance, invalidateTokenAccounts])
 
+
   return (
     <AppPage>
+     
       {account ? (
         <ScrollView
           contentContainerStyle={{}}

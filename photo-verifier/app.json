@@ -9,7 +9,11 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Allow $(PRODUCT_NAME) to access your location to bind photos with time and place."
+      },
+      "bundleIdentifier": "com.beeman.web3jsexpo"
     },
     "android": {
       "adaptiveIcon": {
@@ -17,6 +21,15 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
+      "permissions": [
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.ACCESS_MEDIA_LOCATION"
+      ],
       "package": "com.beeman.web3jsexpo"
     },
     "web": {
@@ -41,7 +54,8 @@
       ],
       "expo-web-browser",
       "expo-font",
-      ["expo-camera",
+      [
+        "expo-camera",
         {
           "cameraPermission": "Allow $(PRODUCT_NAME) to access your camera",
           "microphonePermission": "Allow $(PRODUCT_NAME) to access your microphone",
@@ -54,7 +68,17 @@
           "photosPermission": "Allow $(PRODUCT_NAME) to access your photos.",
           "savePhotosPermission": "Allow $(PRODUCT_NAME) to save photos.",
           "isAccessMediaLocationEnabled": true,
-          "granularPermissions": ["audio", "photo"]
+          "granularPermissions": [
+            "audio",
+            "photo"
+          ]
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow $(PRODUCT_NAME) to access your location to bind photos with time and place.",
+          "isAndroidBackgroundLocationEnabled": false
         }
       ]
     ],
