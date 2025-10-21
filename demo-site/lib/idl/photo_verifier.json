@@ -1,0 +1,39 @@
+{
+  "version": "0.1.0",
+  "name": "photo_verifier",
+  "instructions": [
+    {
+      "name": "createPhotoData",
+      "accounts": [
+        { "name": "payer", "isMut": true, "isSigner": true },
+        { "name": "photoData", "isMut": true, "isSigner": false },
+        { "name": "systemProgram", "isMut": false, "isSigner": false }
+      ],
+      "args": [
+        { "name": "hash", "type": { "array": ["u8", 32] } },
+        { "name": "s3Uri", "type": "string" },
+        { "name": "location", "type": "string" },
+        { "name": "timestamp", "type": "string" }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "PhotoData",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "payer", "type": "publicKey" },
+          { "name": "hash", "type": { "array": ["u8", 32] } },
+          { "name": "s3Uri", "type": "string" },
+          { "name": "location", "type": "string" },
+          { "name": "timestamp", "type": "string" },
+          { "name": "bump", "type": "u8" }
+        ]
+      }
+    }
+  ],
+  "metadata": { "address": "J8U2PEf8ZaXcG5Q7xPCob92qFA8H8LWj1j3xiuKA6QEt" }
+}
+
+
