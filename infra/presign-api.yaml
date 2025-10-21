@@ -1,0 +1,147 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Presign API - HTTP API Gateway + Lambda that returns presigned S3 PUT URLs
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: Target S3 bucket name (e.g., photoverifier)
+  AllowedOrigin:
+    Type: String
+    Default: "*"
+    Description: CORS allowed origin for API responses
+  UrlExpirySeconds:
+    Type: Number
+    Default: 300
+    Description: Presigned URL expiration in seconds
+
+Resources:
+  PresignFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3PutObjectPresign
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - !Sub arn:aws:s3:::${BucketName}/*
+
+  PresignFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt PresignFunctionRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref BucketName
+          URL_EXPIRY_SECONDS: !Ref UrlExpirySeconds
+          ALLOWED_ORIGIN: !Ref AllowedOrigin
+      Code:
+        ZipFile: |
+          import json, os
+          import boto3
+          s3 = boto3.client('s3')
+          BUCKET = os.environ['BUCKET_NAME']
+          EXPIRES = int(os.environ.get('URL_EXPIRY_SECONDS', '300'))
+          ALLOWED_ORIGIN = os.environ.get('ALLOWED_ORIGIN', '*')
+
+          def _response(status, body):
+            return {
+              "statusCode": status,
+              "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+                "Access-Control-Allow-Headers": "*",
+                "Access-Control-Allow-Methods": "POST,OPTIONS"
+              },
+              "body": json.dumps(body)
+            }
+
+          def handler(event, context):
+            if event.get('requestContext', {}).get('http', {}).get('method') == 'OPTIONS':
+              return _response(200, {"ok": True})
+            try:
+              body = event.get('body') or '{}'
+              if event.get('isBase64Encoded'):
+                import base64
+                body = base64.b64decode(body)
+              data = json.loads(body)
+              key = data.get('key')
+              content_type = data.get('contentType', 'application/octet-stream')
+              if not key:
+                return _response(400, {"error": "Missing key"})
+              params = {
+                'Bucket': BUCKET,
+                'Key': key,
+                'ContentType': content_type
+              }
+              url = s3.generate_presigned_url(
+                ClientMethod='put_object',
+                Params=params,
+                ExpiresIn=EXPIRES
+              )
+              return _response(200, {"uploadURL": url, "key": key})
+            except Exception as e:
+              return _response(500, {"error": str(e)})
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: PresignHttpApi
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: [ !Ref AllowedOrigin ]
+        AllowMethods: [ POST, OPTIONS ]
+        AllowHeaders: [ '*' ]
+
+  PresignIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PresignFunction.Arn}/invocations
+      PayloadFormatVersion: '2.0'
+
+  PresignRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /uploads
+      Target: !Sub integrations/${PresignIntegration}
+
+  PresignPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PresignFunction
+      Principal: apigateway.amazonaws.com
+      # Allow any stage/method/path on this API to invoke the Lambda
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/*
+
+  Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+
+Outputs:
+  ApiEndpoint:
+    Description: Base URL for the HTTP API
+    Value: !GetAtt HttpApi.ApiEndpoint
+
+
