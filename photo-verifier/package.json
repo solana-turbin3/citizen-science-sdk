@@ -36,6 +36,7 @@
   "main": "./index.js",
   "version": "1.0.0",
   "dependencies": {
+    "@citizen-science-sdk/photoverifier-sdk": "workspace:*",
     "@expo/vector-icons": "^14.1.0",
     "@napi-rs/blake-hash": "^1.3.5",
     "@react-native-async-storage/async-storage": "2.1.2",

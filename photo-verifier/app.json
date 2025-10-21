@@ -87,7 +87,21 @@
     },
     "extra": {
       "router": {},
-      "eas": {}
+      "eas": {},
+      "s3": {
+        "bucket": "photoverifier",
+        "basePrefix": "photos",
+        "presignEndpoint": "https://yqc2akkjn0.execute-api.us-west-2.amazonaws.com/uploads",
+        "defaultContentType": "image/jpeg"
+      },
+      "seeker": {
+        "devnetMints": "",  
+        "testnetMints": "", 
+        "mainnetMints": "" 
+      },
+      "helius": {
+        "apiKey": ""
+      }
     }
   }
 }

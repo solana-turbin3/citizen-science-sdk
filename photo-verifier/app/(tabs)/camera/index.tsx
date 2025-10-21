@@ -8,17 +8,17 @@ import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system';
 import { useRef, useState } from 'react';
-import { Button, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { blake3 } from '@noble/hashes/blake3'
-import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils'
-import { toUint8Array } from 'js-base64'
+import { Button, StyleSheet, Text, TouchableOpacity, View, Linking, Image, ScrollView } from 'react-native';
+import { utf8ToBytes } from '@noble/hashes/utils'
 import Snackbar from 'react-native-snackbar'
 import { useWalletUi } from '@/components/solana/use-wallet-ui'
 import { Buffer } from 'buffer'
 import { useConnection } from '@/components/solana/solana-provider'
 import { useCluster } from '@/components/cluster/cluster-provider'
 import { AppConfig } from '@/constants/app-config'
-import { NativeModulesProxy } from 'expo-modules-core'
+import { blake3HexFromBase64, captureAndPersist, getCurrentLocation, buildS3KeyForPhoto, buildS3Uri, putToPresignedUrl, isSeekerDevice, verifySeekerWithHelius, buildCreatePhotoDataTransaction, derivePhotoDataPda } from '@citizen-science-sdk/photoverifier-sdk'
+import { requestPresignedPut } from '@/utils/s3'
+import * as Location from 'expo-location'
 
 
 export default function TabCameraScreen() {
@@ -27,8 +27,18 @@ export default function TabCameraScreen() {
   const [mediaPermission, requestMediaPermission] = MediaLibrary.usePermissions();
   const [isReady, setIsReady] = useState(false);
   const [isTaking, setIsTaking] = useState(false);
+  const [isPreviewing, setIsPreviewing] = useState(false);
+  const [previewUri, setPreviewUri] = useState<string | null>(null);
+  const [preHashHex, setPreHashHex] = useState<string | null>(null);
+  const [postHashHex, setPostHashHex] = useState<string | null>(null);
+  const [hashesMatch, setHashesMatch] = useState<boolean | null>(null);
+  const [timestamp, setTimestamp] = useState<string | null>(null);
+  const [locationLoading, setLocationLoading] = useState<boolean>(false);
+  const [locationValue, setLocationValue] = useState<{ latitude: number; longitude: number; accuracy?: number } | null>(null);
+  const [seekerLoading, setSeekerLoading] = useState<boolean>(false);
+  const [seekerMintValue, setSeekerMintValue] = useState<string | null>(null);
   const cameraRef = useRef<any>(null);
-  const { account, signMessage } = useWalletUi()
+  const { account, signMessage, signAndSendTransaction } = useWalletUi()
   const connection = useConnection()
   const { selectedCluster } = useCluster()
 
@@ -51,10 +61,55 @@ export default function TabCameraScreen() {
     setFacing(current => (current === 'back' ? 'front' : 'back'));
   }
 
+  const ensureForegroundLocationPermission = async (): Promise<boolean> => {
+    try {
+      const servicesEnabled = await Location.hasServicesEnabledAsync()
+      if (!servicesEnabled) {
+        Snackbar.show({
+          text: 'Location services are disabled. Enable them to include location metadata.',
+          duration: Snackbar.LENGTH_SHORT,
+          backgroundColor: 'rgba(176,0,32,0.95)',
+          textColor: 'white',
+          action: {
+            text: 'Settings',
+            textColor: 'yellow',
+            onPress: () => {
+              try { Linking.openSettings() } catch {}
+            },
+          },
+        })
+        // Continue without blocking capture; return false to skip location
+        return false
+      }
+      let perm = await Location.getForegroundPermissionsAsync()
+      if (perm.status !== 'granted') {
+        perm = await Location.requestForegroundPermissionsAsync()
+      }
+      if (perm.status !== 'granted') {
+        Snackbar.show({
+          text: 'Location permission denied. Open Settings to grant access.',
+          duration: Snackbar.LENGTH_SHORT,
+          backgroundColor: 'rgba(176,0,32,0.95)',
+          textColor: 'white',
+          action: {
+            text: 'Settings',
+            textColor: 'yellow',
+            onPress: () => {
+              try { Linking.openSettings() } catch {}
+            },
+          },
+        })
+        return false
+      }
+      return true
+    } catch {
+      return false
+    }
+  }
+
   const handleTakePicture = async () => {
     if (!isReady || isTaking) return;
     try {
-      // show immediate feedback via toasts only
       // Ensure we can save to the media library
       if (!mediaPermission?.granted) {
         const result = await requestMediaPermission();
@@ -65,151 +120,81 @@ export default function TabCameraScreen() {
 
       // this is where we start writing image to the media library
       setIsTaking(true);
-      const pictureRef = await cameraRef.current?.takePictureAsync({ pictureRef: true });
-      if (!pictureRef) return;
-      // materialize captured image into a temporary file (not yet in gallery)
-      const saved = await pictureRef.savePictureAsync();
-      if (!saved?.uri) return;
+      const { tempUri, assetUri } = await captureAndPersist(cameraRef)
 
       // 1) Read bytes BEFORE saving to gallery and compute hash
-      const preBase64 = await FileSystem.readAsStringAsync(saved.uri, {
+      const preBase64 = await FileSystem.readAsStringAsync(tempUri, {
         encoding: FileSystem.EncodingType.Base64,
       });
-      const preBytes = toUint8Array(preBase64);
-      const preHex = bytesToHex(blake3(preBytes));
+      const preHex = blake3HexFromBase64(preBase64)
+      setPreHashHex(preHex)
+      const now = new Date().toISOString()
+      setTimestamp(now)
 
       // Begin resolving device location and Seeker NFT in parallel while we continue
       let computedLocation: { latitude: number; longitude: number; accuracy?: number } | null = null
       let computedSeekerMint: string | null = null
 
-      const locationPromise = (async () => {
-        try {
-          // Only attempt to access if the native module exists in this dev client
-          if (!NativeModulesProxy || !(NativeModulesProxy as any).ExpoLocation) return null
-          // eslint-disable-next-line @typescript-eslint/no-var-requires
-          const Location: any = require('expo-location')
-          const perm = await Location.requestForegroundPermissionsAsync()
-          if (perm.status === 'granted') {
-            const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Low })
-            return { latitude: pos.coords.latitude, longitude: pos.coords.longitude, accuracy: pos.coords.accuracy }
-          }
-        } catch {}
-        return null
-      })()
+      const canUseLocation = await ensureForegroundLocationPermission()
+      setLocationLoading(true)
+      const locationPromise = canUseLocation ? getCurrentLocation() : Promise.resolve(null)
 
+      setSeekerLoading(true)
       const seekerPromise = (async () => {
         try {
-          const owner = account?.publicKey?.toString()
-          if (!owner) return null
-          const ownerKey = new (await import('@solana/web3.js')).PublicKey(owner)
-          const seekerMintsByCluster = (() => {
-            switch (selectedCluster.network) {
-              case 'devnet':
-                return AppConfig.seeker.devnetMints
-              case 'testnet':
-                return AppConfig.seeker.testnetMints
-              default:
-                return AppConfig.seeker.mainnetMints
+          const ownerStr = account?.publicKey?.toString()
+          if (!ownerStr || !AppConfig.helius.apiKey) {
+            if (!AppConfig.helius.apiKey) {
+              Snackbar.show({ text: 'Missing Helius API key; cannot verify Seeker SGT', duration: Snackbar.LENGTH_SHORT, backgroundColor: 'rgba(176,0,32,0.95)', textColor: 'white' })
             }
-          })()
-          if (seekerMintsByCluster.length === 0) return null
-          const TOKEN_PROGRAM_ID = (await import('@solana/spl-token')).TOKEN_PROGRAM_ID
-          const TOKEN_2022_PROGRAM_ID = (await import('@solana/spl-token')).TOKEN_2022_PROGRAM_ID
-          const [tokenAccounts, token2022Accounts] = await Promise.all([
-            connection.getParsedTokenAccountsByOwner(ownerKey, { programId: TOKEN_PROGRAM_ID }),
-            connection.getParsedTokenAccountsByOwner(ownerKey, { programId: TOKEN_2022_PROGRAM_ID }),
-          ])
-          const allAccounts = [...tokenAccounts.value, ...token2022Accounts.value]
-          for (const acc of allAccounts) {
-            const parsed: any = acc.account.data
-            const mint: string | undefined = parsed?.parsed?.info?.mint
-            const amount: string | undefined = parsed?.parsed?.info?.tokenAmount?.amount
-            const decimals: number | undefined = parsed?.parsed?.info?.tokenAmount?.decimals
-            if (mint && seekerMintsByCluster.includes(mint) && amount !== '0') {
-              // Prefer NFTs (decimals 0), else first match
-              return mint
-            }
+            return null
           }
-        } catch {}
-        return null
+          const res = await verifySeekerWithHelius({ walletAddress: ownerStr, heliusApiKey: AppConfig.helius.apiKey })
+          return res.isVerified ? res.mint : null
+        } catch { return null }
       })()
 
       // (We will await these promises after computing the post-save hash)
 
       // 2) Save to gallery and get asset local URI
-      const asset = await MediaLibrary.createAssetAsync(saved.uri);
-      const info = await MediaLibrary.getAssetInfoAsync(asset);
-      const localUri = info.localUri;
+      const localUri = assetUri;
       if (!localUri) {
         throw new Error('Unable to resolve saved asset localUri');
       }
+      // Enter preview mode immediately with the saved local URI
+      setPreviewUri(localUri)
+      setIsPreviewing(true)
 
       // 3) Read bytes AFTER saving to gallery and compute hash
       const postBase64 = await FileSystem.readAsStringAsync(localUri, {
         encoding: FileSystem.EncodingType.Base64,
       });
-      const postBytes = toUint8Array(postBase64);
-      const postHex = bytesToHex(blake3(postBytes));
+      const postHex = blake3HexFromBase64(postBase64)
+      setPostHashHex(postHex)
 
       // 4) Compare
       const ok = preHex === postHex;
-      const timestamp = new Date().toISOString()
+      setHashesMatch(ok)
 
-      // Await background lookups and show a single summary message
+      // Await background lookups and update progressive states
       try {
         const [locRes, seekerRes] = await Promise.allSettled([locationPromise, seekerPromise])
         computedLocation = locRes.status === 'fulfilled' ? locRes.value : null
+        setLocationValue(computedLocation)
+        setLocationLoading(false)
         computedSeekerMint = seekerRes.status === 'fulfilled' ? seekerRes.value : null
-        const locText = computedLocation
-          ? `${computedLocation.latitude.toFixed(5)}, ${computedLocation.longitude.toFixed(5)}${
-              computedLocation.accuracy ? ` ±${Math.round(computedLocation.accuracy)}m` : ''
-            }`
-          : 'unavailable'
-        const seekerText = computedSeekerMint ?? 'none'
-        const matchText = ok ? 'verified' : 'mismatch'
-        Snackbar.show({
-          text: `Time: ${timestamp}\nHash: ${preHex}\nMatch: ${matchText}\nLocation: ${locText}\nSeeker: ${seekerText}`,
-          duration: Snackbar.LENGTH_SHORT,
-          backgroundColor: 'rgba(33, 33, 33, 0.95)',
-          textColor: 'white',
-          numberOfLines: 8,
-        })
-      } catch {}
-
-      // 5) Build signed payload with timestamp, location, owner and persist a local proof
-      const location = computedLocation
-
-      const owner = account?.publicKey?.toString()
-
-      // Use resolved Seeker NFT mint address, if any
-      const seekerMint: string | null = computedSeekerMint
-      const payload = {
-        hash: preHex,
-        uri: localUri,
-        timestamp,
-        location,
-        owner,
-        seekerMint,
-      }
-      const payloadJson = JSON.stringify(payload)
-      let signatureBase64: string | null = null
-      try {
-        const sigBytes = await signMessage(Buffer.from(utf8ToBytes(payloadJson)))
-        signatureBase64 = Buffer.from(sigBytes).toString('base64')
-      } catch (e) {
-        Snackbar.show({ text: 'Unable to sign payload with wallet', duration: Snackbar.LENGTH_SHORT, backgroundColor: 'rgba(176, 0, 32, 0.95)', textColor: 'white' })
-      }
-
-      const proof = { payload, signature: signatureBase64 }
-      try {
-        const dir = FileSystem.documentDirectory ? FileSystem.documentDirectory + 'proofs' : null
-        if (dir) {
-          await FileSystem.makeDirectoryAsync(dir, { intermediates: true }).catch(() => {})
-          const path = `${dir}/proof-${preHex}.json`
-          await FileSystem.writeAsStringAsync(path, JSON.stringify(proof))
-          Snackbar.show({ text: 'Signed image proof saved', duration: Snackbar.LENGTH_SHORT, backgroundColor: 'rgba(76, 175, 80, 0.95)', textColor: 'white' })
+        // Devnet fallback for Seeker Genesis Token when verification isn't available
+        if (!computedSeekerMint && selectedCluster.network === 'devnet') {
+          computedSeekerMint = '4mjmWDfmoxZJchYhyEimQa5RtXwoN2AUiABPaCQ9Nmii'
         }
-      } catch {}
+        setSeekerMintValue(computedSeekerMint)
+        setSeekerLoading(false)
+      } catch {
+        setLocationLoading(false)
+        setSeekerLoading(false)
+      }
+
+      // Defer upload and proof submission to explicit user action in preview UI
     } catch (e: any) {
       Snackbar.show({
         text: `Error: ${e?.message ?? 'Unknown error'}`,
@@ -222,27 +207,174 @@ export default function TabCameraScreen() {
     }
   };
 
+  const handleDiscard = () => {
+    setIsPreviewing(false)
+    setPreviewUri(null)
+    setPreHashHex(null)
+    setPostHashHex(null)
+    setHashesMatch(null)
+    setTimestamp(null)
+    setLocationLoading(false)
+    setLocationValue(null)
+    setSeekerLoading(false)
+    setSeekerMintValue(null)
+  }
+
+  const handleUploadAndSubmit = async () => {
+    try {
+      if (!previewUri || !preHashHex) {
+        Snackbar.show({ text: 'Missing preview or hash', duration: Snackbar.LENGTH_SHORT, backgroundColor: 'rgba(176,0,32,0.95)', textColor: 'white' })
+        return
+      }
+      const owner = account?.publicKey?.toString()
+      const ts = timestamp ?? new Date().toISOString()
+      const seekerMint = seekerMintValue
+
+      // Snapshot current values to allow background proof creation even if we reset UI
+      const snapshot = {
+        hashHex: preHashHex,
+        localUri: previewUri,
+        ts,
+        location: locationValue,
+        owner,
+        seekerMint,
+      }
+
+      let remoteUri: string | null = null
+      try {
+        if (!seekerMint) {
+          const deviceMsg = isSeekerDevice() ? 'on Seeker device but no SGT in wallet' : 'not a Seeker device'
+          Snackbar.show({ text: `Requires Seeker to upload: ${deviceMsg}`, duration: Snackbar.LENGTH_SHORT, backgroundColor: 'rgba(33,33,33,0.95)', textColor: 'white' })
+        } else {
+          const key = buildS3KeyForPhoto({
+            seekerMint,
+            photoHashHex: preHashHex,
+            extension: 'jpg',
+            basePrefix: AppConfig.s3.basePrefix,
+          })
+          const { uploadURL, key: returnedKey } = await requestPresignedPut(AppConfig.s3.presignEndpoint, {
+            key,
+            contentType: AppConfig.s3.defaultContentType,
+          })
+          const bytes = await FileSystem.readAsStringAsync(previewUri, { encoding: FileSystem.EncodingType.Base64 })
+          const u8 = Uint8Array.from(Buffer.from(bytes, 'base64'))
+          await putToPresignedUrl({ url: uploadURL, bytes: u8, contentType: AppConfig.s3.defaultContentType })
+          remoteUri = buildS3Uri(AppConfig.s3.bucket, returnedKey || key)
+          Snackbar.show({ text: 'Uploaded photo to S3', duration: Snackbar.LENGTH_SHORT, backgroundColor: 'rgba(76, 175, 80, 0.95)', textColor: 'white' })
+
+          // On-chain submit (separate step so wallet cancellation isn’t reported as S3 failure)
+          try {
+            if (!account?.publicKey || !remoteUri) return
+            const locationString = locationValue ? `${locationValue.latitude},${locationValue.longitude}` : ''
+            if (remoteUri.length > 256) {
+              Snackbar.show({ text: 'S3 URI too long (>256)', duration: Snackbar.LENGTH_SHORT, backgroundColor: 'rgba(176,0,32,0.95)', textColor: 'white' })
+              return
+            }
+            if (locationString.length > 256) {
+              Snackbar.show({ text: 'Location string too long (>256)', duration: Snackbar.LENGTH_SHORT, backgroundColor: 'rgba(176,0,32,0.95)', textColor: 'white' })
+              return
+            }
+
+            const hashBytes = Uint8Array.from(Buffer.from(preHashHex, 'hex'))
+            const [pda] = derivePhotoDataPda(account.publicKey, hashBytes, ts)
+            const existing = await connection.getAccountInfo(pda)
+            if (existing) {
+              Snackbar.show({ text: 'Photo already recorded on-chain (PDA exists)', duration: Snackbar.LENGTH_SHORT, backgroundColor: 'rgba(33,33,33,0.95)', textColor: 'white' })
+              return
+            }
+
+            const { transaction } = await buildCreatePhotoDataTransaction({
+              connection,
+              payer: account.publicKey,
+              hash32: hashBytes,
+              s3Uri: remoteUri,
+              location: locationString,
+              timestamp: ts,
+            })
+
+            const {
+              context: { slot: minContextSlot },
+            } = await connection.getLatestBlockhashAndContext()
+            const simRes = await connection.simulateTransaction(transaction as any, { replaceRecentBlockhash: true, sigVerify: false })
+
+            if (simRes.value.err) {
+              console.log('Simulation logs:', simRes.value.logs)
+              Snackbar.show({ text: 'Simulation failed (see logs)', duration: Snackbar.LENGTH_SHORT, backgroundColor: 'rgba(176,0,32,0.95)', textColor: 'white' })
+              return
+            }
+
+            const signature = await signAndSendTransaction(transaction as any, minContextSlot)
+
+            Snackbar.show({ text: 'Submitted on-chain transaction', duration: Snackbar.LENGTH_SHORT, backgroundColor: 'rgba(76, 175, 80, 0.95)', textColor: 'white' })
+
+            handleDiscard()
+            try { Linking.openURL(`https://solscan.io/tx/${signature}?cluster=${selectedCluster.network}`) } catch {}
+          } catch (err: any) {
+            const msg = String(err || '')
+            const friendly = msg.includes('CancellationException') ? 'Wallet request canceled' : (err?.message ?? 'unknown error')
+            Snackbar.show({ text: `On-chain submit failed: ${friendly}`, duration: Snackbar.LENGTH_SHORT, backgroundColor: 'rgba(176,0,32,0.95)', textColor: 'white' })
+          }
+        }
+      } catch (e: any) {
+        console.log('S3 upload error', e)
+        Snackbar.show({ text: `S3 upload failed: ${e?.message ?? 'unknown error'}`, duration: Snackbar.LENGTH_SHORT, backgroundColor: 'rgba(176,0,32,0.95)', textColor: 'white' })
+      }
+
+    } catch (e: any) {
+      Snackbar.show({ text: `Error: ${e?.message ?? 'Unknown error'}`, duration: Snackbar.LENGTH_SHORT, backgroundColor: 'rgba(176,0,32,0.95)', textColor: 'white' })
+    }
+  }
+
   return (
     <View style={styles.container}>
-      <CameraView
-        ref={cameraRef}
-        style={styles.camera}
-        facing={facing}
-        onCameraReady={() => setIsReady(true)}
-      />
-      {/* Toasts replace inline status UI */}
-      <View style={styles.buttonContainer}>
-        <TouchableOpacity style={styles.button} onPress={toggleCameraFacing}>
-          <Text style={styles.text}>Flip Camera</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.button}
-          onPress={handleTakePicture}
-          disabled={!isReady || isTaking}
-        >
-          <View style={[styles.shutter, isTaking ? { opacity: 0.6 } : null]} />
-        </TouchableOpacity>
-      </View>
+      {!isPreviewing ? (
+        <>
+          <CameraView
+            ref={cameraRef}
+            style={styles.camera}
+            facing={facing}
+            onCameraReady={() => setIsReady(true)}
+          />
+          <View style={styles.buttonContainer}>
+            <TouchableOpacity style={styles.button} onPress={toggleCameraFacing}>
+              <Text style={styles.text}>Flip Camera</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.button}
+              onPress={handleTakePicture}
+              disabled={!isReady || isTaking}
+            >
+              <View style={[styles.shutter, isTaking ? { opacity: 0.6 } : null]} />
+            </TouchableOpacity>
+          </View>
+        </>
+      ) : (
+        <View style={styles.previewContainer}>
+          {!!previewUri && (
+            <Image source={{ uri: previewUri }} style={styles.previewImage} resizeMode="contain" />
+          )}
+          <View style={styles.statsPanel}>
+            <ScrollView style={{ maxHeight: 200 }}>
+              <Text style={styles.statText}>Time: {timestamp ?? 'loading...'}</Text>
+              <Text style={styles.statText}>Hash (pre): {preHashHex ?? 'loading...'}</Text>
+              <Text style={styles.statText}>Hash (post): {postHashHex ?? 'loading...'}</Text>
+              <Text style={styles.statText}>Match: {hashesMatch == null ? 'loading...' : (hashesMatch ? 'verified' : 'mismatch')}</Text>
+              <Text style={styles.statText}>
+                Location: {locationLoading ? 'loading...' : (locationValue ? `${locationValue.latitude.toFixed(5)}, ${locationValue.longitude.toFixed(5)}${locationValue.accuracy ? ` ±${Math.round(locationValue.accuracy)}m` : ''}` : 'unavailable')}
+              </Text>
+              <Text style={styles.statText}>Seeker: {seekerLoading ? 'loading...' : (seekerMintValue ?? 'none')}</Text>
+            </ScrollView>
+            <View style={styles.previewButtons}>
+              <TouchableOpacity onPress={handleDiscard} style={[styles.actionButton, styles.discardButton]}>
+                <Text style={styles.actionText}>Discard</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={handleUploadAndSubmit} style={[styles.actionButton, styles.uploadButton]}>
+                <Text style={styles.actionText}>Upload & Submit</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -258,6 +390,16 @@ const styles = StyleSheet.create({
   },
   camera: {
     flex: 1,
+  },
+  previewContainer: {
+    flex: 1,
+    backgroundColor: 'black',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  previewImage: {
+    flex: 1,
+    width: '100%',
   },
   buttonContainer: {
     position: 'absolute',
@@ -283,5 +425,40 @@ const styles = StyleSheet.create({
     fontSize: 24,
     fontWeight: 'bold',
     color: 'white',
+  },
+  statsPanel: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    padding: 16,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+  },
+  statText: {
+    color: 'white',
+    fontSize: 14,
+    marginBottom: 6,
+  },
+  previewButtons: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 12,
+  },
+  actionButton: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  discardButton: {
+    backgroundColor: 'rgba(176,0,32,0.9)',
+  },
+  uploadButton: {
+    backgroundColor: 'rgba(76,175,80,0.9)',
+  },
+  actionText: {
+    color: 'white',
+    fontWeight: 'bold',
+    fontSize: 16,
   },
 });

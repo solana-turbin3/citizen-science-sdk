@@ -1,0 +1,9 @@
+{
+  "name": "citizen-science-sdk-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "photo-verifier",
+    "packages/*"
+  ]
+}
