@@ -1,0 +1,3 @@
+[submodule "blake3wasmapp"]
+	path = blake3wasmapp
+	url = https://github.com/MarvinSunday/blake3wasmapp.git
